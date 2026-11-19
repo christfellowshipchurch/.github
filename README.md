@@ -135,6 +135,11 @@ Exactly one box must be ticked. A bot's PR with no box ticked (Dependabot) count
 change request from anyone blocks every tier until it's approved over or dismissed. Approvals from
 `ignored-approvers` (default `christfellowshipdev`) don't count.
 
+While a Medium or High PR waits for an approval, the check asks `reviewers` (default `dzwood
+leoalfonso14`) to review, so it shows in their queue. It skips the author, drafts, anyone already
+asked and anyone who has already reviewed the latest commit. The check still fails until someone
+approves; a failed request (Dependabot's token is read-only) only logs a warning.
+
 The org ruleset requires a check named exactly `risk-tier` and 0 approvals, so this check decides.
 Each repo calls the shared workflow the same way as verify, and re-runs it when the description
 changes or a review comes in:
@@ -150,7 +155,7 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write # to request reviewers
 
 concurrency:
   group: risk-tier-${{ github.event.pull_request.number }}

@@ -22,10 +22,18 @@ on:
         required: false
         type: string
         default: christfellowshipdev
+      reviewers:
+        description: >-
+          Logins, separated by spaces or commas, asked to review a Medium or High PR that has no
+          approval of its latest commit yet. The author is never asked.
+        required: false
+        type: string
+        default: dzwood leoalfonso14
 
+# pull-requests: write is only used to request reviewers. The caller must grant it too.
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   tier:
@@ -38,6 +46,7 @@ jobs:
         env:
           LOW_PATHS: ${{ inputs.low-paths }}
           IGNORED_APPROVERS: ${{ inputs.ignored-approvers }}
+          REVIEWERS: ${{ inputs.reviewers }}
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -125,6 +134,26 @@ jobs:
               .map((r) => r.user.login)
               .filter((login) => login !== author && !ignored.has(login.toLowerCase()));
             if (approvers.length === 0) {
+              // Ask for a review, so the PR shows in the reviewers' queue. Skip drafts, anyone
+              // already asked, and anyone who has already reviewed the latest commit.
+              const reviewedHead = new Set(reviews.filter((r) => r.user && r.commit_id === pr.head.sha).map((r) => r.user.login.toLowerCase()));
+              const pending = new Set((pr.requested_reviewers || []).map((u) => u.login.toLowerCase()));
+              const toAsk = (process.env.REVIEWERS || '')
+                .split(/[\s,]+/)
+                .filter(Boolean)
+                .filter((l) => {
+                  const k = l.toLowerCase();
+                  return k !== author.toLowerCase() && !ignored.has(k) && !pending.has(k) && !reviewedHead.has(k);
+                });
+              if (!pr.draft && toAsk.length > 0) {
+                try {
+                  await github.rest.pulls.requestReviewers({ owner, repo, pull_number: number, reviewers: toAsk });
+                  core.info(`Asked ${toAsk.join(', ')} to review.`);
+                } catch (err) {
+                  // Dependabot's and forks' tokens are read-only; the check result doesn't depend on this.
+                  core.warning(`Couldn't request reviewers (${toAsk.join(', ')}): ${err.message}`);
+                }
+              }
               core.setFailed(`${tier} PRs need an approval of the latest commit from someone other than the author` +
                 (ignored.size ? ` (approvals from ${[...ignored].join(', ')} don't count).` : '.'));
               return;
