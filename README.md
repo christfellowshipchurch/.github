@@ -8,6 +8,7 @@ Shared files for the app repos: cf-external-web, my-church-platform, cf-rev and 
 | `shared/CLAUDE.shared.md` | The master copy of the block at the top of each repo's `CLAUDE.md` |
 | `.github/workflows/verify-pnpm.yml` | Reusable checks for the pnpm apps |
 | `.github/workflows/verify-bun.yml` | Reusable checks for the Bun apps |
+| `.github/workflows/risk-tier.yml` | Reusable check that enforces approvals by risk tier |
 
 This repo is public. Don't put anything here that isn't fine for anyone to read.
 
@@ -118,3 +119,65 @@ moves its pin:
    and open a PR. Its `verify` run tests the new version against that repo.
 
 Pin every action in these workflows to a full commit SHA with a version comment.
+
+## Risk tier check
+
+`risk-tier.yml` reads the box ticked under "## Risk tier" in the PR description and decides what
+the PR needs before it can merge:
+
+| Tier | Needs |
+| --- | --- |
+| Low | No approval. Every changed file (and a renamed file's old path) must match the repo's `low-paths`. |
+| Medium | An approval of the latest commit from someone other than the author |
+| High | The same, plus a code-owner review, which the org ruleset enforces from each repo's CODEOWNERS |
+
+Exactly one box must be ticked. A bot's PR with no box ticked (Dependabot) counts as Medium. A
+change request from anyone blocks every tier until it's approved over or dismissed. Approvals from
+`ignored-approvers` (default `christfellowshipdev`) don't count.
+
+The org ruleset requires a check named exactly `risk-tier` and 0 approvals, so this check decides.
+Each repo calls the shared workflow the same way as verify, and re-runs it when the description
+changes or a review comes in:
+
+```yaml
+name: Risk tier
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: risk-tier-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tier:
+    uses: christfellowshipchurch/.github/.github/workflows/risk-tier.yml@<full commit SHA> # main
+    with:
+      low-paths: |
+        docs/**
+        **/*.md
+        !AGENTS.md
+
+  # The check the org ruleset requires; same pattern as verify.
+  risk-tier:
+    name: risk-tier
+    needs: [tier]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require the risk tier check to pass
+        env:
+          RESULT: ${{ needs.tier.result }}
+        run: test "$RESULT" = success
+```
+
+`low-paths` globs: `*` stays within a folder, `**` crosses folders, a line starting with `!`
+excludes, and the last matching line wins. Lines starting with `#` are ignored.

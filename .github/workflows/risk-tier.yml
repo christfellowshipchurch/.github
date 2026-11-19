@@ -1,0 +1,132 @@
+name: Risk tier
+
+# Enforces the approval each risk tier needs. Reads the Low/Medium/High box ticked in the PR's
+# "Risk tier" section (from the org PR template), then:
+#   Low:          no approval, but every changed file must match the repo's `low-paths` list.
+#   Medium, High: one approval of the current commit from someone other than the author.
+# High paths also need a code-owner review; the org ruleset enforces that from CODEOWNERS.
+# Called from each app repo's own workflow; see README.md for how a repo calls it and keeps a
+# required check named `risk-tier`.
+on:
+  workflow_call:
+    inputs:
+      low-paths:
+        description: >-
+          Globs, one per line, for files a Low PR may touch. `*` stays within a folder, `**`
+          crosses folders, and a line starting with `!` excludes; the last matching line wins.
+          Lines starting with `#` are ignored.
+        required: true
+        type: string
+      ignored-approvers:
+        description: Logins, separated by spaces or commas, whose approval doesn't count.
+        required: false
+        type: string
+        default: christfellowshipdev
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  tier:
+    name: tier
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the risk tier
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          LOW_PATHS: ${{ inputs.low-paths }}
+          IGNORED_APPROVERS: ${{ inputs.ignored-approvers }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const number = context.payload.pull_request.number;
+            // Re-read the PR: a review event's payload can hold an older body.
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+            const author = pr.user.login;
+
+            // The ticked box in the "Risk tier" section, up to the next "## " heading.
+            const body = (pr.body || '').replace(/\r\n/g, '\n');
+            const section = (body.match(/^##[ \t]+Risk tier[ \t]*\n([\s\S]*?)(?=^##[ \t]|(?![\s\S]))/m) || [])[1] || '';
+            const ticked = [...section.matchAll(/^[ \t]*[-*][ \t]+\[[xX]\][ \t]+(Low|Medium|High)\b/gm)].map((m) => m[1]);
+            let tier;
+            if (ticked.length === 1) {
+              tier = ticked[0];
+            } else if (ticked.length === 0 && pr.user.type === 'Bot') {
+              tier = 'Medium'; // Dependabot and other bots don't fill in the template.
+            } else {
+              core.setFailed(
+                ticked.length === 0
+                  ? 'Tick one box (Low, Medium or High) under "## Risk tier" in the PR description.'
+                  : `Tick only one box under "## Risk tier"; found ${ticked.join(', ')}.`,
+              );
+              return;
+            }
+            core.info(`Risk tier: ${tier}`);
+
+            // Each reviewer's latest approval, change request or dismissal. A change request blocks
+            // every tier until that reviewer approves or the request is dismissed.
+            const reviews = await github.paginate(github.rest.pulls.listReviews, { owner, repo, pull_number: number, per_page: 100 });
+            const latest = new Map();
+            for (const r of reviews) {
+              if (!r.user || !['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) continue;
+              latest.set(r.user.login, r);
+            }
+            const blockers = [...latest.values()].filter((r) => r.state === 'CHANGES_REQUESTED').map((r) => r.user.login);
+            if (blockers.length > 0) {
+              core.setFailed(`Changes requested by ${blockers.join(', ')}.`);
+              return;
+            }
+
+            if (tier === 'Low') {
+              const toRegExp = (glob) => {
+                let re = '';
+                for (let i = 0; i < glob.length; i++) {
+                  const c = glob[i];
+                  if (c === '*' && glob[i + 1] === '*') {
+                    i++;
+                    if (glob[i + 1] === '/') { i++; re += '(?:.*/)?'; } else { re += '.*'; }
+                  } else if (c === '*') re += '[^/]*';
+                  else if (c === '?') re += '[^/]';
+                  else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+                }
+                return new RegExp(`^${re}$`);
+              };
+              const rules = (process.env.LOW_PATHS || '')
+                .split('\n')
+                .map((line) => line.trim())
+                .filter((line) => line && !line.startsWith('#'))
+                .map((line) => line.startsWith('!')
+                  ? { allow: false, re: toRegExp(line.slice(1)) }
+                  : { allow: true, re: toRegExp(line) });
+              const isLow = (path) => rules.reduce((ok, r) => (r.re.test(path) ? r.allow : ok), false);
+
+              const files = await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number: number, per_page: 100 });
+              const paths = files.flatMap((f) => (f.previous_filename ? [f.filename, f.previous_filename] : [f.filename]));
+              const outside = [...new Set(paths.filter((p) => !isLow(p)))];
+              if (outside.length > 0) {
+                core.setFailed(
+                  `Low PRs may only touch the repo's low-risk paths. Tick Medium, or move these out of the PR:\n` +
+                    outside.map((p) => `  ${p}`).join('\n'),
+                );
+                return;
+              }
+              core.info(`All ${paths.length} changed paths are low-risk. No approval needed.`);
+              return;
+            }
+
+            // Medium and High: an approval of the current head commit from someone else.
+            const ignored = new Set(
+              (process.env.IGNORED_APPROVERS || '').split(/[\s,]+/).filter(Boolean).map((l) => l.toLowerCase()),
+            );
+            const approvers = [...latest.values()]
+              .filter((r) => r.state === 'APPROVED' && r.commit_id === pr.head.sha)
+              .map((r) => r.user.login)
+              .filter((login) => login !== author && !ignored.has(login.toLowerCase()));
+            if (approvers.length === 0) {
+              core.setFailed(`${tier} PRs need an approval of the latest commit from someone other than the author` +
+                (ignored.size ? ` (approvals from ${[...ignored].join(', ')} don't count).` : '.'));
+              return;
+            }
+            core.info(`Approved by ${approvers.join(', ')}.`);
