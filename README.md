@@ -140,6 +140,11 @@ leoalfonso14`) to review, so it shows in their queue. It skips the author, draft
 asked and anyone who has already reviewed the latest commit. The check still fails until someone
 approves; a failed request (Dependabot's token is read-only) only logs a warning.
 
+A review doesn't run the check again. A second run would add a second `risk-tier` result to the
+commit, and GitHub blocks the merge while either one fails. Instead the review event re-runs the
+PR's latest pull_request run, which then reads the new review. If that re-run can't start, use
+"Re-run all jobs" on the pull_request run in the Checks tab.
+
 The org ruleset requires a check named exactly `risk-tier` and 0 approvals, so this check decides.
 Each repo calls the shared workflow the same way as verify, and re-runs it when the description
 changes or a review comes in:
@@ -154,11 +159,13 @@ on:
     types: [submitted, dismissed]
 
 permissions:
+  actions: write # to re-run the check after a review
   contents: read
   pull-requests: write # to request reviewers
 
+# Keyed by event too: the re-run started by a review must not cancel the review's own run.
 concurrency:
-  group: risk-tier-${{ github.event.pull_request.number }}
+  group: risk-tier-${{ github.event_name }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:

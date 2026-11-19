@@ -7,6 +7,10 @@ name: Risk tier
 # High paths also need a code-owner review; the org ruleset enforces that from CODEOWNERS.
 # Called from each app repo's own workflow; see README.md for how a repo calls it and keeps a
 # required check named `risk-tier`.
+#
+# On a review, the check isn't run again here: a second run would add a second `risk-tier` result
+# to the commit, and GitHub blocks the merge while either one is failing. Instead the `rerun` job
+# re-runs the PR's latest pull_request run, so the one result that counts is brought up to date.
 on:
   workflow_call:
     inputs:
@@ -30,14 +34,17 @@ on:
         type: string
         default: dzwood leoalfonso14
 
-# pull-requests: write is only used to request reviewers. The caller must grant it too.
+# pull-requests: write is only used to request reviewers, and actions: write only to re-run the
+# check after a review. The caller must grant both.
 permissions:
+  actions: write
   contents: read
   pull-requests: write
 
 jobs:
   tier:
     name: tier
+    if: ${{ github.event_name != 'pull_request_review' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -159,3 +166,41 @@ jobs:
               return;
             }
             core.info(`Approved by ${approvers.join(', ')}.`);
+
+  rerun:
+    name: rerun
+    if: ${{ github.event_name == 'pull_request_review' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Re-run the check for the reviewed commit
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = context.payload.pull_request.head.sha;
+            const { data: self } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: context.runId });
+            // The newest pull_request run of this workflow for the commit. If it's still running
+            // it may have read the reviews before this one, so wait for it, then re-run it.
+            for (let i = 0; i < 18; i++) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: self.workflow_id, head_sha: sha, event: 'pull_request', per_page: 1,
+              });
+              const run = data.workflow_runs[0];
+              if (!run) {
+                core.warning(`No pull_request run of this workflow for ${sha}; push a commit or edit the description to run the check.`);
+                return;
+              }
+              if (run.status === 'completed') {
+                try {
+                  await github.rest.actions.reRunWorkflow({ owner, repo, run_id: run.id });
+                  core.info(`Re-running run ${run.id} for ${sha}.`);
+                } catch (err) {
+                  // Dependabot's token is read-only. The check result doesn't depend on this run.
+                  core.warning(`Couldn't re-run run ${run.id} (${err.message}). Re-run it from the Checks tab.`);
+                }
+                return;
+              }
+              await new Promise((r) => setTimeout(r, 10000));
+            }
+            core.warning(`Run for ${sha} was still running after 3 minutes; re-run it from the Checks tab if it doesn't pass.`);
