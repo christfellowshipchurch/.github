@@ -8,7 +8,8 @@ CFDP-____ (or N/A)
 
 ## Risk tier
 
-<!-- Low: copy, styles, docs, component-only. Medium: most loader, action and UI feature work. High: Rock writes or workflow launches, auth and sessions, cache invalidation, search index config, env files or task definitions, CI workflows. -->
+<!-- Low: copy, styles, docs, component-only. Medium: most loader, action and UI feature work. High: Rock writes or workflow launches, auth and sessions, cache invalidation, search index config, env files or task definitions, CI workflows.
+Tick exactly one; the risk-tier check reads it. Low merges with no approval but may only touch the repo's low-risk paths (its risk-tier.yml). Medium and High need an approval of the latest commit, and High paths also need a code-owner review. -->
 
 - [ ] Low
 - [ ] Medium
